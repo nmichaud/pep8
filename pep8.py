@@ -108,6 +108,7 @@ try:
 except NameError:
     from sets import ImmutableSet as frozenset
 
+from pyflakes.messages import Message
 
 DEFAULT_EXCLUDE = '.svn,CVS,.bzr,.hg,.git'
 DEFAULT_IGNORE = 'E24'
@@ -827,7 +828,11 @@ class Checker(object):
             self.lines = readlines(filename)
         else:
             self.lines = lines
-        options.counters['physical lines'] += len(self.lines)
+        self.physical_checks = find_checks('physical_line')
+        self.logical_checks = find_checks('logical_line')
+        self.counters = dict.fromkeys(BENCHMARK_KEYS, 0)
+        self.messages = []
+        self.counters['physical lines'] += len(self.lines)
 
     def readline(self):
         """
@@ -864,7 +869,7 @@ class Checker(object):
         self.physical_line = line
         if self.indent_char is None and len(line) and line[0] in ' \t':
             self.indent_char = line[0]
-        for name, check, argument_names in options.physical_checks:
+        for name, check, argument_names in self.physical_checks:
             result = self.run_check(check, argument_names)
             if result is not None:
                 offset, text = result
@@ -909,17 +914,13 @@ class Checker(object):
         """
         Build a line from tokens and run all logical checks on it.
         """
-        options.counters['logical lines'] += 1
+        self.counters['logical lines'] += 1
         self.build_tokens_line()
         first_line = self.lines[self.mapping[0][1][2][0] - 1]
         indent = first_line[:self.mapping[0][1][2][1]]
         self.previous_indent_level = self.indent_level
         self.indent_level = expand_indent(indent)
-        if options.verbose >= 2:
-            print(self.logical_line[:80].rstrip())
-        for name, check, argument_names in options.logical_checks:
-            if options.verbose >= 4:
-                print('   ' + name)
+        for name, check, argument_names in self.logical_checks:
             result = self.run_check(check, argument_names)
             if result is not None:
                 offset, text = result
@@ -951,13 +952,6 @@ class Checker(object):
         self.tokens = []
         parens = 0
         for token in tokenize.generate_tokens(self.readline_check_physical):
-            if options.verbose >= 3:
-                if token[2][0] == token[3][0]:
-                    pos = '[%s:%s]' % (token[2][1] or '', token[3][1])
-                else:
-                    pos = 'l.%s' % token[3][0]
-                print('l.%s\t%s\t%s\t%r' %
-                    (token[2][0], pos, tokenize.tok_name[token[0]], token[1]))
             self.tokens.append(token)
             token_type, text = token[0:2]
             if token_type == tokenize.OP and text in '([{':
@@ -995,40 +989,56 @@ class Checker(object):
         code = text[:4]
         if ignore_code(code):
             return
-        if options.quiet == 1 and not self.file_errors:
-            message(self.filename)
-        if code in options.counters:
-            options.counters[code] += 1
+        if code in self.counters:
+            self.counters[code] += 1
         else:
-            options.counters[code] = 1
-            options.messages[code] = text[5:]
-        if options.quiet or code in self.expected:
+            self.counters[code] = 1
+            #self.messages[code] = text[5:]
+        if code in self.expected:
             # Don't care about expected errors or warnings
             return
         self.file_errors += 1
-        if options.counters[code] == 1 or options.repeat:
-            message("%s:%s:%d: %s" %
-                    (self.filename, self.line_offset + line_number,
-                     offset + 1, text))
-            if options.show_source:
-                line = self.lines[line_number - 1]
-                message(line.rstrip())
-                message(' ' * offset + '^')
-            if options.show_pep8:
-                message(check.__doc__.lstrip('\n').rstrip())
+        if self.counters[code] == 1 or options.repeat:
+            self.messages.append(
+                PEP8Message(self.filename, 
+                            Loc(self.line_offset + line_number, offset+1), 
+                            text[5:])
+                )
+
+class PEP8Message(Message):
+    _message = "%s"
+    def __init__(self, filename, loc, text):
+        Message.__init__(self, filename, loc, message_args=(text,))
+
+class Loc(object):
+    def __init__(self, lineno, col):
+        self.lineno = lineno
+        self.col = col
+
+def ignore_code(code):
+    """
+    Check if options.ignore contains a prefix of the error code.
+    If options.select contains a prefix of the error code, do not ignore it.
+    """
+    for select in options.select:
+        if code.startswith(select):
+            return False
+    for ignore in options.ignore:
+        if code.startswith(ignore):
+            return True
 
 
 def input_file(filename):
-    """
+    """  
     Run all checks on a Python source file.
     """
     if options.verbose:
         message('checking ' + filename)
-    errors = Checker(filename).check_all()
-
+    checker = Checker(filename)
+    errors = checker.check_all()
 
 def input_dir(dirname, runner=None):
-    """
+    """  
     Check all Python source files in this directory and all subdirectories.
     """
     dirname = dirname.rstrip('/')
@@ -1039,7 +1049,7 @@ def input_dir(dirname, runner=None):
     for root, dirs, files in os.walk(dirname):
         if options.verbose:
             message('directory ' + root)
-        options.counters['directories'] += 1
+        options.counters['directories'] += 1 
         dirs.sort()
         for subdir in dirs:
             if excluded(subdir):
@@ -1073,20 +1083,6 @@ def filename_match(filename):
         if fnmatch(filename, pattern):
             return True
 
-
-def ignore_code(code):
-    """
-    Check if options.ignore contains a prefix of the error code.
-    If options.select contains a prefix of the error code, do not ignore it.
-    """
-    for select in options.select:
-        if code.startswith(select):
-            return False
-    for ignore in options.ignore:
-        if code.startswith(ignore):
-            return True
-
-
 def reset_counters():
     for key in list(options.counters.keys()):
         if key not in BENCHMARK_KEYS:
@@ -1102,7 +1098,6 @@ def get_error_statistics():
 def get_warning_statistics():
     """Get warning statistics."""
     return get_statistics("W")
-
 
 def get_statistics(prefix=''):
     """
@@ -1132,7 +1127,6 @@ def get_count(prefix=''):
             count += options.counters[key]
     return count
 
-
 def print_statistics(prefix=''):
     """Print overall statistics (number of errors and warnings)."""
     for line in get_statistics(prefix):
@@ -1148,6 +1142,7 @@ def print_benchmark(elapsed):
         print('%-7d %s per second (%d total)' % (
             options.counters[key] / elapsed, key,
             options.counters[key]))
+
 
 
 def run_tests(filename):
